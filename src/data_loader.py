@@ -27,11 +27,19 @@ class CocoDetection(Dataset):
         labels = []
         for ann in annotations:
             x, y, w, h = ann['bbox']
+            # Fix: skip invalid boxes (w or h <= 0)
+            if w <= 0 or h <= 0:
+                continue
             boxes.append([x, y, x + w, y + h])  # Convert to [x_min, y_min, x_max, y_max]
             labels.append(ann['category_id'])
 
-        boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        labels = torch.as_tensor(labels, dtype=torch.int64)
+        if len(boxes) == 0:
+            # If no valid boxes, create a dummy box and label to avoid empty tensor errors
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.int64)
+        else:
+            boxes = torch.as_tensor(boxes, dtype=torch.float32)
+            labels = torch.as_tensor(labels, dtype=torch.int64)
         image_id = torch.tensor([img_id])
 
         target = {
