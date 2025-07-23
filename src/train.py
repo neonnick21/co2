@@ -8,6 +8,23 @@ import os
 import time
 import numpy as np
 from datetime import datetime
+import json  # Added missing import
+from scipy.optimize import linear_sum_assignment  # Added for Hungarian matcher
+
+# You need to define or import generalized_iou and compute_cost_matrix
+# Placeholder implementations below (replace with your actual functions)
+def generalized_iou(boxes1, boxes2):
+    # Dummy implementation, replace with your actual GIoU function
+    # boxes1, boxes2: (N, 4) tensors
+    return torch.ones(boxes1.shape[0], device=boxes1.device)
+
+def compute_cost_matrix(pred_boxes, target_boxes):
+    # Dummy implementation, replace with your actual cost computation
+    # Here, we use L1 distance as a simple cost
+    if pred_boxes.shape[0] == 0 or target_boxes.shape[0] == 0:
+        return torch.zeros((pred_boxes.shape[0], target_boxes.shape[0]), device=pred_boxes.device)
+    cost = torch.cdist(pred_boxes, target_boxes, p=1)
+    return cost
 
 def compute_loss(outputs, targets):
     # Classification loss (Focal loss)
