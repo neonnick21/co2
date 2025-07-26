@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision.models import resnet50
 from scipy.optimize import linear_sum_assignment
 
+# Note: The RFDETR class itself is already structured correctly and does not require changes.
 class RFDETR(nn.Module):
     def __init__(self, num_classes, num_queries):
         super(RFDETR, self).__init__()
@@ -55,55 +56,70 @@ class RFDETR(nn.Module):
         outputs = self.transformer_decoder(queries, memory)
         
         class_logits = self.class_head(outputs)
-        bbox_preds = self.bbox_head(outputs)
+        bbox_preds = self.bbox_head(outputs).sigmoid() # Sigmoid for normalized box coords
         
         return class_logits, bbox_preds
 
-def compute_loss(pred_logits, pred_boxes, targets):
-    total_class_loss = 0
-    total_bbox_loss = 0
-    num_matches = 0
+def compute_loss(pred_logits, pred_boxes, targets, num_classes, device):
+    """
+    Computes the total loss for a batch of predictions and targets.
+    This function replaces hungarian_matcher and the old compute_loss.
+    """
+    total_class_loss = torch.tensor(0.0, device=device)
+    total_bbox_loss = torch.tensor(0.0, device=device)
+    
+    batch_size, num_queries = pred_logits.shape[:2]
 
     # Iterate through each image in the batch
-    for i in range(len(targets)):
+    for i in range(batch_size):
         # Get predictions and targets for the current image
-        pred_logits_i = pred_logits[i]
-        pred_boxes_i = pred_boxes[i]
-        target_labels_i = targets[i]['labels']
-        target_boxes_i = targets[i]['boxes']
+        pred_logits_i = pred_logits[i] # [num_queries, num_classes]
+        pred_boxes_i = pred_boxes[i]   # [num_queries, 4]
+        target_labels_i = targets[i]['labels'] # [num_targets]
+        target_boxes_i = targets[i]['boxes']   # [num_targets, 4]
 
-        # Skip images with no annotations
-        if len(target_labels_i) == 0:
+        num_targets = len(target_labels_i)
+        
+        # If no targets, compute classification loss for 'no-object' class
+        if num_targets == 0:
+            no_object_class = num_classes - 1
+            class_loss = F.cross_entropy(pred_logits_i, torch.full((num_queries,), no_object_class, device=device))
+            total_class_loss += class_loss
             continue
 
-        # Compute cost matrices
+        # Compute classification cost: The negative log likelihood of the predictions
+        # against the target labels. We broadcast this over all predictions.
         cost_class = -pred_logits_i[:, target_labels_i].softmax(-1).log()
+
+        # Compute bounding box cost: The L1 distance between predicted and target boxes
+        # We need to normalize the target boxes to be in the range [0, 1] if they aren't already.
+        # This assumes the model outputs normalized box coordinates.
         cost_bbox = torch.cdist(pred_boxes_i, target_boxes_i, p=1)
-
-        # Combine costs and use Hungarian algorithm
-        total_cost = cost_class + cost_bbox
-        row_ind, col_ind = linear_sum_assignment(total_cost.detach().cpu().numpy())
-
-        # Compute losses for matched predictions
-        for pred_idx, target_idx in zip(row_ind, col_ind):
-            # Classification loss
-            pred_label = pred_logits_i[pred_idx].unsqueeze(0)
-            target_label = target_labels_i[target_idx].unsqueeze(0)
-            class_loss = F.cross_entropy(pred_label, target_label)
-            total_class_loss += class_loss
-
-            # Bounding box loss (L1 loss)
-            pred_box = pred_boxes_i[pred_idx]
-            target_box = target_boxes_i[target_idx]
-            bbox_loss = F.l1_loss(pred_box, target_box, reduction='sum')
-            total_bbox_loss += bbox_loss
-
-            num_matches += 1
-
-    # Average losses over the number of matches found across the batch
-    if num_matches > 0:
-        total_loss = (total_class_loss + total_bbox_loss) / num_matches
-    else:
-        total_loss = torch.tensor(0.0, device=pred_logits.device)
         
-    return total_loss
+        # Combine costs and find optimal matches using the Hungarian algorithm (on CPU)
+        C = cost_class + cost_bbox
+        C = C.detach().cpu().numpy()
+        
+        # This is the bottleneck! It requires CPU and will be slow.
+        row_ind, col_ind = linear_sum_assignment(C)
+
+        # Matched Predictions: Compute losses for the pairs found
+        class_loss_matched = F.cross_entropy(pred_logits_i[row_ind], target_labels_i[col_ind], reduction='mean')
+        bbox_loss_matched = F.l1_loss(pred_boxes_i[row_ind], target_boxes_i[col_ind], reduction='mean')
+        
+        # Unmatched Predictions: Compute classification loss for 'no-object' class
+        # We create a mask for unmatched queries and compute the loss on them
+        unmatched_preds_mask = torch.ones(num_queries, dtype=torch.bool, device=device)
+        unmatched_preds_mask[row_ind] = False
+        
+        no_object_class = num_classes - 1
+        class_loss_unmatched = F.cross_entropy(
+            pred_logits_i[unmatched_preds_mask], 
+            torch.full((torch.sum(unmatched_preds_mask).item(),), no_object_class, device=device)
+        )
+        
+        total_class_loss += class_loss_matched + class_loss_unmatched
+        total_bbox_loss += bbox_loss_matched
+    
+    # Average the losses over the batch
+    return (total_class_loss + total_bbox_loss) / batch_size

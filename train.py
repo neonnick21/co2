@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from model import RFDETR, compute_loss
-from data_preprocessing import BccdDataset, get_transform
+from data_preprocessing import BccdDataset, get_transform, download_and_extract_dataset
 
 def custom_collate_fn(batch):
     images = []
@@ -13,15 +13,19 @@ def custom_collate_fn(batch):
         images.append(item[0])
         targets.append(item[1])
     
-    # We don't stack images here because the model can handle them in a list
-    # with different sizes, or they can be padded inside the model's forward pass.
-    # The `RFDETR` model is not designed to handle a list of tensors, so we stack them.
     images = torch.stack(images)
     
     return images, targets
 
 if __name__ == '__main__':
+    # --- Configuration & Automated Setup ---
+    DATASET_URL = "https://public.roboflow.com/ds/GVJCultPuQ?key=0AVhhCEQpy"
     DATASET_BASE_DIR = Path("BCCD.v3-raw.coco")
+
+    # Step 1: Automatically download and extract the dataset if it doesn't exist.
+    download_and_extract_dataset(url=DATASET_URL, dest_path=DATASET_BASE_DIR)
+
+    # --- Path Definitions ---
     TRAIN_DATA_ROOT = DATASET_BASE_DIR / "train"
     TRAIN_ANNOTATION_FILE = TRAIN_DATA_ROOT / "_annotations.coco.json"
 
@@ -43,7 +47,12 @@ if __name__ == '__main__':
 
     train_loader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=custom_collate_fn)
 
+    # Use a GPU if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     model = RFDETR(num_classes=num_classes, num_queries=100)
+    model.to(device)
     model.train()
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
@@ -55,10 +64,14 @@ if __name__ == '__main__':
         for images, targets in train_loader:
             optimizer.zero_grad()
             
+            # Move images and targets to the same device as the model
+            images = images.to(device)
+            # Targets is a list of dictionaries, move tensors inside each dict
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
             pred_logits, pred_boxes = model(images)
             
-            # Pass the original lists of tensors to the loss function
-            loss = compute_loss(pred_logits, pred_boxes, targets)
+            loss = compute_loss(pred_logits, pred_boxes, targets, num_classes, device)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
