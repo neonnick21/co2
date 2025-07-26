@@ -1,0 +1,9 @@
+matplotlib
+Pillow
+torch
+torchvision
+requests
+transformers
+scipy
+accelerate
+safetensors
