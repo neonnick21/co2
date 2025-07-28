@@ -2,7 +2,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
-from model import RFDETR, compute_loss
+from model import RFDETR, compute_loss # Import updated compute_loss
 from data_preprocessing import BccdDataset, get_transform, download_and_extract_dataset
 
 def custom_collate_fn(batch):
@@ -18,14 +18,7 @@ def custom_collate_fn(batch):
     return images, targets
 
 if __name__ == '__main__':
-    # --- Configuration & Automated Setup ---
-    DATASET_URL = "https://public.roboflow.com/ds/GVJCultPuQ?key=0AVhhCEQpy"
     DATASET_BASE_DIR = Path("BCCD.v3-raw.coco")
-
-    # Step 1: Automatically download and extract the dataset if it doesn't exist.
-    download_and_extract_dataset(url=DATASET_URL, dest_path=DATASET_BASE_DIR)
-
-    # --- Path Definitions ---
     TRAIN_DATA_ROOT = DATASET_BASE_DIR / "train"
     TRAIN_ANNOTATION_FILE = TRAIN_DATA_ROOT / "_annotations.coco.json"
 
@@ -40,14 +33,11 @@ if __name__ == '__main__':
     )
     print(f"Dataset size: {len(dataset)}")
 
-    # Correctly determine the number of classes from the dataset
-    # We add 1 for the 'no object' class, which is standard in DETR.
     num_classes = len(dataset.cat_id_to_name) + 1
     print(f"Number of classes (including no-object): {num_classes}")
 
     train_loader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=custom_collate_fn)
 
-    # Use a GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -64,13 +54,12 @@ if __name__ == '__main__':
         for images, targets in train_loader:
             optimizer.zero_grad()
             
-            # Move images and targets to the same device as the model
             images = images.to(device)
-            # Targets is a list of dictionaries, move tensors inside each dict
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
             pred_logits, pred_boxes = model(images)
             
+            # Pass all necessary arguments to the updated compute_loss
             loss = compute_loss(pred_logits, pred_boxes, targets, num_classes, device)
             loss.backward()
             optimizer.step()
@@ -80,3 +69,6 @@ if __name__ == '__main__':
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
     print("Training complete.")
+    
+    torch.save(model.state_dict(), 'rfd_et-r_model.pth')
+    print("Model saved to rfd_et-r_model.pth")
