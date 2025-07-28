@@ -114,7 +114,7 @@ class RFDETR(nn.Module):
         # We need to pick a fixed number of queries (self.num_queries)
         # For simplicity, we'll take the first num_queries from the flattened features.
         # In a real DETR, you'd use the decoder output based on self.num_queries.
-        # Here, let's just use the query embeddings as the 'queries' for the prediction heads directly,
+        # Here, let's just use the query embeddings directly as the 'queries' for the prediction heads directly,
         # which are then transformed by the encoder.
         
         # Using the output corresponding to the query_embeds (if they were part of transformer input)
@@ -125,33 +125,10 @@ class RFDETR(nn.Module):
         # This part is simplified from a full DETR decoder. We assume `hs` somehow incorporates
         # the query information from `query_embeds`.
         
-        # For prediction, we need to apply the class and bbox heads to `self.query_embed.weight` after
-        # they have been processed by some transformer layers (e.g., a decoder).
-        # Since we only have an encoder, a very simple way is to use the query embeddings themselves
-        # as the 'query' for prediction after they've been potentially 'updated' by interaction
-        # with feature map via encoder. Let's make it simpler and consistent with previous code.
-        
         # Predictions are based on the transformer output 'hs', which has (H*W, B, C)
         # We need predictions for `num_queries`.
         # Simplistic approach: take the top `num_queries` confident predictions or
         # use a fixed subset of `hs` as "object queries".
-        # Let's use the query embeddings directly as learned "object queries" that
-        # are transformed by the final layers.
-        
-        # The transformer output `hs` is (H*W, B, C). We need `num_queries` predictions.
-        # A common simplified DETR approach (without a full decoder) would use `self.query_embed.weight`
-        # transformed by layers that interact with `hs`.
-        
-        # Let's simplify and use the `query_embeds` (which are learned)
-        # as the representation for which predictions are made, assuming they are refined
-        # by the encoder's implicit global context understanding.
-        
-        # Reshape hs to (B, H*W, C)
-        hs = hs.permute(1, 0, 2) # (B, H*W, C)
-
-        # For the prediction heads, we can use the original query_embeds (B, num_queries, C)
-        # or some transformed version. In a full DETR, this comes from the decoder output.
-        # Given our current encoder-only setup, we can use a simpler approach.
         # Let's use the query embeddings as direct inputs to the prediction heads.
         # For now, we'll just take the first `num_queries` from the flattened features.
         
