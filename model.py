@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50
 from scipy.optimize import linear_sum_assignment
-# Import GIoU loss for robust bounding box cost
-from torchvision.ops.boxes import generalized_box_iou_loss
+# Import GIoU for the cost matrix, and GIoU loss for the actual loss calculation
+from torchvision.ops import generalized_box_iou # For pairwise GIoU in cost matrix
+from torchvision.ops import generalized_box_iou_loss # For the loss component
 
 class RFDETR(nn.Module):
     def __init__(self, num_classes, num_queries):
@@ -109,124 +110,78 @@ class RFDETR(nn.Module):
         
         return class_logits, bbox_preds
 
-def compute_loss(pred_logits, pred_boxes, targets, num_classes, device, 
-                 cost_class_weight=1.0, cost_bbox_weight=5.0, cost_giou_weight=2.0):
+# The following code is a revised version of the function in model.py
+# to address the negative loss issue.
+
+def compute_loss(pred_logits, pred_boxes, targets, num_classes, device,
+                 cost_class_weight=1.0, cost_bbox_weight=5.0, cost_giou_weight=2.0,
+                 loss_class_weight=1.0, loss_bbox_weight=5.0, loss_giou_weight=2.0):
     """
     Computes the total loss for a batch of predictions and targets using bipartite matching.
-
-    Args:
-        pred_logits (torch.Tensor): Predicted class logits. Shape: [batch_size, num_queries, num_classes]
-        pred_boxes (torch.Tensor): Predicted bounding box coordinates (normalized [0,1]). Shape: [batch_size, num_queries, 4]
-        targets (list[dict]): List of dictionaries, each containing 'labels' and 'boxes' for a target image.
-        num_classes (int): Total number of classes including the 'no-object' class.
-        device (torch.device): The device (CPU or CUDA) to perform calculations on.
-        cost_class_weight (float): Weight for the classification cost in matching.
-        cost_bbox_weight (float): Weight for the L1 bounding box cost in matching.
-        cost_giou_weight (float): Weight for the GIoU bounding box cost in matching.
-
-    Returns:
-        torch.Tensor: The total computed loss for the batch.
     """
     total_class_loss = torch.tensor(0.0, device=device)
     total_bbox_l1_loss = torch.tensor(0.0, device=device)
     total_giou_loss = torch.tensor(0.0, device=device)
-    
-    batch_size, num_queries = pred_logits.shape[:2]
-    no_object_class_label = num_classes - 1 # Index of the 'no-object' class
 
-    # Iterate through each image in the batch
+    batch_size, num_queries = pred_logits.shape[:2]
+    no_object_class_label = num_classes - 1
+
     for i in range(batch_size):
-        # Get predictions and targets for the current image
-        pred_logits_i = pred_logits[i] # [num_queries, num_classes]
-        pred_boxes_i = pred_boxes[i]   # [num_queries, 4]
-        target_labels_i = targets[i]['labels'] # [num_targets]
-        target_boxes_i = targets[i]['boxes']   # [num_targets, 4]
+        pred_logits_i = pred_logits[i]
+        pred_boxes_i = pred_boxes[i]
+        target_labels_i = targets[i]['labels']
+        target_boxes_i = targets[i]['boxes']
 
         num_targets = len(target_labels_i)
-        
-        # If there are no ground truth objects in this image, all predictions should be 'no-object'
+
         if num_targets == 0:
-            # Classification loss for 'no-object' class for all queries
             class_loss = F.cross_entropy(pred_logits_i, torch.full((num_queries,), no_object_class_label, device=device))
             total_class_loss += class_loss
-            continue # No bbox or giou loss if no targets
+            continue
 
-        # --- Construct the Cost Matrix for Hungarian Matching ---
+        # Corrected cost calculation: Use F.cross_entropy directly
+        cost_class = F.cross_entropy(pred_logits_i.unsqueeze(1).repeat(1, num_targets, 1).view(-1, num_classes),
+                                     target_labels_i.unsqueeze(0).repeat(num_queries, 1).view(-1),
+                                     reduction='none').view(num_queries, num_targets)
 
-        # 1. Classification Cost: Negative log-likelihood between predicted logits and target labels
-        # Reshape target_labels_i to [1, num_targets] for broadcasting
-        # We compute -log(P(class | query)) for each query and each target class
-        # pred_logits_i.softmax(-1): [num_queries, num_classes] probabilities
-        # pred_logits_i.softmax(-1)[:, target_labels_i]: [num_queries, num_targets] probabilities for target classes
-        # .log(): then take log
-        cost_class = -pred_logits_i.softmax(-1)[:, target_labels_i].log()
-        # This will result in a [num_queries, num_targets] matrix where
-        # cost_class[q, t] = -log(P(target_label_t | query_q_prediction))
-
-        # 2. L1 Bounding Box Cost: Absolute difference between predicted and target boxes
-        # torch.cdist computes pairwise distances. p=1 for L1 distance.
-        # pred_boxes_i: [num_queries, 4], target_boxes_i: [num_targets, 4]
-        # Result: [num_queries, num_targets]
         cost_bbox = torch.cdist(pred_boxes_i, target_boxes_i, p=1)
-        
-        # 3. GIoU Bounding Box Cost: Measures spatial overlap and alignment
-        # Requires boxes in (x1, y1, x2, y2) format, which is assumed for pred_boxes_i and target_boxes_i (normalized [0,1])
-        # Returns a [num_queries, num_targets] matrix where lower values are better (closer to 1)
-        # We use (1 - giou_score) as a cost, so lower is better.
-        cost_giou = 1 - generalized_box_iou_loss(pred_boxes_i, target_boxes_i, reduction='none')
 
-        # Combine costs for bipartite matching using weights
-        # All cost matrices should have shape [num_queries, num_targets]
+        cost_giou = 1 - generalized_box_iou(pred_boxes_i, target_boxes_i)
+
         C = cost_class_weight * cost_class + \
             cost_bbox_weight * cost_bbox + \
             cost_giou_weight * cost_giou
-        
-        # Move the cost matrix to CPU and convert to numpy for linear_sum_assignment
-        # This is the unavoidable bottleneck for DETR's Hungarian matching.
+
         C = C.detach().cpu().numpy()
-        
-        # Find optimal matches using the Hungarian algorithm
-        row_ind, col_ind = linear_sum_assignment(C) # row_ind are query indices, col_ind are target indices
 
-        # --- Compute Losses based on Found Matches ---
+        row_ind, col_ind = linear_sum_assignment(C)
 
-        # 1. Classification Loss (matched queries)
-        # For matched queries, compute cross-entropy loss against their assigned target labels
         matched_pred_logits = pred_logits_i[row_ind]
         matched_target_labels = target_labels_i[col_ind]
         class_loss_matched = F.cross_entropy(matched_pred_logits, matched_target_labels)
         total_class_loss += class_loss_matched
 
-        # 2. Classification Loss (unmatched queries - background)
-        # Queries not in row_ind are considered unmatched. They should predict 'no-object'.
         unmatched_preds_mask = torch.ones(num_queries, dtype=torch.bool, device=device)
         unmatched_preds_mask[row_ind] = False
-        
-        # Labels for unmatched predictions are all 'no-object'
+
         num_unmatched_preds = torch.sum(unmatched_preds_mask).item()
         if num_unmatched_preds > 0:
             class_loss_unmatched = F.cross_entropy(
-                pred_logits_i[unmatched_preds_mask], 
+                pred_logits_i[unmatched_preds_mask],
                 torch.full((num_unmatched_preds,), no_object_class_label, device=device)
             )
             total_class_loss += class_loss_unmatched
-        
-        # 3. Bounding Box L1 Loss (only for matched queries)
+
         matched_pred_boxes = pred_boxes_i[row_ind]
         matched_target_boxes = target_boxes_i[col_ind]
-        # Reduction='mean' means average over matched boxes
         bbox_l1_loss = F.l1_loss(matched_pred_boxes, matched_target_boxes, reduction='mean')
         total_bbox_l1_loss += bbox_l1_loss
 
-        # 4. GIoU Loss (only for matched queries)
         giou_loss = generalized_box_iou_loss(matched_pred_boxes, matched_target_boxes, reduction='mean')
         total_giou_loss += giou_loss
 
-    # Average total losses over the batch size
-    # Apply coefficients to the total average losses
-    final_loss = (total_class_loss / batch_size) + \
-                 (cost_bbox_weight * total_bbox_l1_loss / batch_size) + \
-                 (cost_giou_weight * total_giou_loss / batch_size)
+    final_loss = (loss_class_weight * total_class_loss / batch_size) + \
+                 (loss_bbox_weight * total_bbox_l1_loss / batch_size) + \
+                 (loss_giou_weight * total_giou_loss / batch_size)
 
     return final_loss
-
