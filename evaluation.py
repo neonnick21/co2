@@ -103,21 +103,14 @@ def evaluate(model, data_loader, num_classes, device):
     # Compute the final metrics across all batches
     metrics_result = metric.compute()
     
-    # Extract the map metric from the MetricCollection result
-    map_metric = metrics_result['map']
-    
-    # Torchmetrics 0.11.0 and later returns a dict of tensors for mAP components
-    # We want to return a flat dictionary for easier printing/access
-    # Also, ensure 'map_per_class' and 'mar_100' are present for older versions of torchmetrics if needed
-    # (though newer versions might structure these differently within the 'map' dict itself)
-    
     # Flatten the map_metric dictionary for consistent access
+    # Direct access from metrics_result as MetricCollection might flatten
     final_metrics = {
-        'map': map_metric['map'].item(),
-        'map_50': map_metric['map_50'].item(),
-        'map_75': map_metric['map_75'].item(),
-        'map_per_class': map_metric['map_per_class'].mean().item() if 'map_per_class' in map_metric else torch.tensor(0.0).item(), # Handle if not directly present or if it's a list
-        'mar_100': map_metric['mar_100'].item() if 'mar_100' in map_metric else torch.tensor(0.0).item(),
+        'map': metrics_result['map'].item(),
+        'map_50': metrics_result['map_50'].item(),
+        'map_75': metrics_result['map_75'].item(),
+        'map_per_class': metrics_result['map_per_class'].mean().item() if 'map_per_class' in metrics_result else torch.tensor(0.0).item(), # Handle if not directly present or if it's a list
+        'mar_100': metrics_result['mar_100'].item() if 'mar_100' in metrics_result else torch.tensor(0.0).item(),
         # Add other relevant metrics if needed
     }
     
