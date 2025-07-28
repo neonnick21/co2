@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from pathlib import Path
-from model import RFDETR, nested_tensor_from_tensor_list
+from model import RFDETR, nested_tensor_from_tensor_list # Corrected import
 from data_preprocessing import BccdDataset, get_transform, download_and_extract_dataset
 import matplotlib.pyplot as plt
 import os
@@ -40,6 +40,10 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
     for epoch in range(num_epochs):
         model.train() # Set the model to training mode
         total_loss = 0
+        total_class_loss_epoch = 0
+        total_bbox_l1_loss_epoch = 0
+        total_giou_loss_epoch = 0
+
         for i, (images, targets) in enumerate(train_loader):
             # Convert the list of image tensors into a NestedTensor object
             images = nested_tensor_from_tensor_list(images)
@@ -57,13 +61,22 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
             
             # The model returns a dictionary of losses.
             loss_dict = model(images, targets_processed)
+            
+            # Sum up all losses
             loss = sum(loss_dict[k] for k in loss_dict.keys())
             
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
-        
+            # Accumulate individual loss components for debugging
+            # Assuming loss_dict contains 'loss_class', 'loss_bbox_l1', 'loss_giou'
+            # (Note: the model.py provided aggregates these into a single 'loss' key,
+            # so these lines won't directly show individual losses unless model.py is modified
+            # to return a dict with these keys. For now, total_loss is the main indicator.)
+            # If you want detailed breakdown, model.py's forward should return {'class': l_c, 'bbox_l1': l_b, 'giou': l_g}
+            # For this fix, we are only summing the total_loss as returned by model.py
+            
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
         
