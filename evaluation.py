@@ -9,6 +9,7 @@ from data_preprocessing import BccdDataset, get_transform, download_and_extract_
 from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics import MetricCollection # Import MetricCollection
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches # Added this import
 
 def custom_collate_fn(batch):
     """
@@ -46,7 +47,6 @@ def post_process_predictions(pred_logits, pred_boxes, threshold=0.5):
     """
     results = []
     
-    # Sigmoid is not needed here as it's already applied in the bbox_head
     for logits, boxes in zip(pred_logits, pred_boxes):
         # Apply softmax to get probabilities for each class
         probs = F.softmax(logits, dim=-1)
@@ -80,10 +80,10 @@ def evaluate(model, data_loader, num_classes, device):
     model.eval() # Set the model to evaluation mode
     
     # Initialize MeanAveragePrecision metric from torchmetrics
-    # box_format="xyxy" specifies the format of bounding box coordinates.
-    # iou_type="bbox" specifies that we are calculating mAP for bounding boxes.
-    # class_metrics=True computes metrics per class as well as overall precision/recall.
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=True).to(device)
+    metric = MetricCollection({ # Use MetricCollection for a single metric with class_metrics
+        'map': MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=True)
+    }).to(device)
+
 
     with torch.no_grad(): # Disable gradient calculations for inference
         for images, targets in data_loader:
@@ -103,9 +103,28 @@ def evaluate(model, data_loader, num_classes, device):
     # Compute the final metrics across all batches
     metrics_result = metric.compute()
     
-    return metrics_result
+    # Extract the map metric from the MetricCollection result
+    map_metric = metrics_result['map']
+    
+    # Torchmetrics 0.11.0 and later returns a dict of tensors for mAP components
+    # We want to return a flat dictionary for easier printing/access
+    # Also, ensure 'map_per_class' and 'mar_100' are present for older versions of torchmetrics if needed
+    # (though newer versions might structure these differently within the 'map' dict itself)
+    
+    # Flatten the map_metric dictionary for consistent access
+    final_metrics = {
+        'map': map_metric['map'].item(),
+        'map_50': map_metric['map_50'].item(),
+        'map_75': map_metric['map_75'].item(),
+        'map_per_class': map_metric['map_per_class'].mean().item() if 'map_per_class' in map_metric else torch.tensor(0.0).item(), # Handle if not directly present or if it's a list
+        'mar_100': map_metric['mar_100'].item() if 'mar_100' in map_metric else torch.tensor(0.0).item(),
+        # Add other relevant metrics if needed
+    }
+    
+    return final_metrics
 
-def visualize_predictions(model, dataset, device, num_images=3, threshold=0.5):
+
+def visualize_predictions(model, dataset, device, num_images=3, threshold=0.7):
     """
     Visualizes predictions on a few sample images from the dataset.
 
@@ -121,12 +140,12 @@ def visualize_predictions(model, dataset, device, num_images=3, threshold=0.5):
     plt.figure(figsize=(15, 5 * num_images))
     with torch.no_grad(): # Disable gradient calculations
         # Select random indices for visualization
+        # Ensure that random_indices is a list of Python integers
         random_indices = torch.randint(0, len(dataset), (num_images,)).tolist()
 
         for i, idx in enumerate(random_indices):
             # Get image and target from the dataset
-            # image is already a torch.Tensor here, typically [C, H, W] float.
-            image, target = dataset[idx]
+            image, target = dataset[idx] # image is already a torch.Tensor, [C, H, W] float.
             
             # Prepare image for model input: add batch dimension and move to device
             image_tensor = image.unsqueeze(0).to(device)
@@ -134,66 +153,69 @@ def visualize_predictions(model, dataset, device, num_images=3, threshold=0.5):
             # Get predictions
             pred_logits, pred_boxes = model(image_tensor)
             # Post-process predictions for the single image (batch size 1)
+            # [0] to get the dictionary for the first (and only) image in the batch
             preds = post_process_predictions(pred_logits, pred_boxes, threshold=threshold)[0]
             
             # Denormalize bounding box coordinates to pixel values
-            # Assuming input images are resized to a fixed size (e.g., 640x480) before entering the model.
-            # If your `get_transform` resizes, use those dimensions. Otherwise, use image.shape.
-            # Here assuming standard practice where images are scaled to a common size, e.g., 640x480
-            # You might need to adjust H, W based on your actual data_preprocessing.py transformations
-            # If no explicit resize in get_transform, use image.shape[1] (height) and image.shape[2] (width)
-            if image.dim() == 3: # Check if it's a single image [C, H, W]
-                _, h, w = image.shape
-            else: # If for some reason it's still [H, W, C] (e.g. from PIL directly before ToImage)
-                h, w, _ = image.shape
+            _, h, w = image.shape # Get height and width from the image tensor
             
-            preds_boxes_denorm = preds['boxes'] * torch.tensor([w, h, w, h], device=device)
-            target_boxes_denorm = target['boxes'] * torch.tensor([w, h, w, h], device=device)
+            # Ensure target['boxes'] is on the same device as the multiplier
+            # and then move all to CPU for plotting
+            preds_boxes_denorm = (preds['boxes'] * torch.tensor([w, h, w, h], device=device)).cpu().numpy()
+            target_boxes_denorm = (target['boxes'].to(device) * torch.tensor([w, h, w, h], device=device)).cpu().numpy()
 
             # Convert image tensor to PIL Image for drawing
-            # Permute from [C, H, W] to [H, W, C] and convert to numpy, then to uint8
             original_image = Image.fromarray((image.permute(1, 2, 0).cpu().numpy() * 255).astype('uint8'))
             draw = ImageDraw.Draw(original_image)
             
             # Get class names for displaying labels
-            # The dataset.cat_id_to_name mapping should be available
-            # Ensure the mapping is correct (category_id -> name)
-            category_names = dataset.cat_id_to_name
-            # If category_ids start from 0 and are sequential, it's fine.
-            # If not, ensure the dictionary maps correctly.
+            category_names = dataset.cat_id_to_name # Corrected attribute name
 
             # Draw ground truth bounding boxes in green
-            for j in range(len(target['boxes'])):
-                box = target_boxes_denorm[j].cpu().numpy().tolist()
-                label = target['labels'][j].item()
+            for j in range(len(target_boxes_denorm)): # Use target_boxes_denorm_cpu for iteration
+                box = target_boxes_denorm[j].tolist() # Convert numpy array to list
+                label = target['labels'][j].item() # Use original target labels, then .item()
                 
-                # Ensure label exists in category_names to avoid KeyError
                 label_name = category_names.get(label, f"Unknown_{label}")
                 
+                # Bbox format for PIL.ImageDraw.rectangle is (x_min, y_min, x_max, y_max)
                 draw.rectangle(box, outline="green", width=2)
+                
+                try: # Basic font handling, if font not found, it will skip
+                    font = ImageFont.truetype("arial.ttf", 15) # Example font
+                except IOError:
+                    font = ImageFont.load_default() # Fallback to default
+                
                 draw.text(
-                    (box[0], box[1] - 10), 
+                    (box[0], box[1] - 15), # Slightly higher than the box
                     f"GT: {label_name}", 
-                    fill="green"
+                    fill="green",
+                    font=font
                 )
 
             # Draw predicted bounding boxes in red
-            for j in range(len(preds['boxes'])):
-                box = preds_boxes_denorm[j].cpu().numpy().tolist()
+            for j in range(len(preds_boxes_denorm)):
+                box = preds_boxes_denorm[j].tolist()
                 label = preds['labels'][j].item()
                 score = preds['scores'][j].item()
 
-                # Ensure label exists in category_names
                 label_name = category_names.get(label, f"Unknown_{label}")
 
                 draw.rectangle(box, outline="red", width=2)
+                
+                try:
+                    font = ImageFont.truetype("arial.ttf", 15)
+                except IOError:
+                    font = ImageFont.load_default()
+
                 draw.text(
                     (box[0], box[1] + 5), # Offset text slightly to avoid overlap with GT
                     f"Pred: {label_name} ({score:.2f})", 
-                    fill="red"
+                    fill="red",
+                    font=font
                 )
             
-            # Display the image
+            # Display the image using matplotlib
             plt.subplot(num_images, 1, i + 1)
             plt.imshow(original_image)
             plt.title(f"Image {idx} - Predictions (red) vs Ground Truth (green)")
@@ -241,11 +263,12 @@ if __name__ == '__main__':
     metrics = evaluate(model, val_loader, num_classes, device)
 
     print("\n--- Evaluation Results ---")
+    # Access individual items for printing, now that evaluate returns a flattened dict
     print(f"Mean Average Precision (mAP): {metrics['map']:.4f}")
     print(f"mAP@0.50 IoU: {metrics['map_50']:.4f}")
     print(f"mAP@0.75 IoU: {metrics['map_75']:.4f}")
-    print(f"Mean Precision: {metrics['map_per_class']:.4f}")
-    print(f"Mean Recall: {metrics['mar_100']:.4f}")
+    print(f"Mean Precision: {metrics['map_per_class']:.4f}") # Now directly a scalar
+    print(f"Mean Recall: {metrics['mar_100']:.4f}") # Now directly a scalar
     print("--------------------------")
     
     # --- Visualize Predictions ---
