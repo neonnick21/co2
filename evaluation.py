@@ -80,16 +80,21 @@ def evaluate(model, data_loader, num_classes, device):
     model.eval() # Set the model to evaluation mode
     
     # Initialize MeanAveragePrecision metric from torchmetrics
-    metric = MetricCollection({ # Use MetricCollection for a single metric with class_metrics
-        'map': MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=True)
-    }).to(device)
+    # We now use the standard keys provided by the metric
+    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox", class_metrics=True).to(device)
 
 
     with torch.no_grad(): # Disable gradient calculations for inference
         for images, targets in data_loader:
             # Move images and targets to the specified device
             images = images.to(device)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            # Ensure target bounding boxes are on the correct device and in the expected format
+            targets_processed = []
+            for t in targets:
+                targets_processed.append({
+                    "boxes": t['boxes'].to(device),
+                    "labels": t['labels'].to(device)
+                })
 
             # Get model predictions
             pred_logits, pred_boxes = model(images)
@@ -98,22 +103,26 @@ def evaluate(model, data_loader, num_classes, device):
             preds = post_process_predictions(pred_logits, pred_boxes)
             
             # Update the metric with the current batch's predictions and targets
-            metric.update(preds, targets)
+            metric.update(preds, targets_processed)
             
     # Compute the final metrics across all batches
     metrics_result = metric.compute()
     
-    # Flatten the map_metric dictionary for consistent access
-    # Direct access from metrics_result as MetricCollection might flatten
+    # Correctly access the metric results using their default keys
     final_metrics = {
         'map': metrics_result['map'].item(),
         'map_50': metrics_result['map_50'].item(),
         'map_75': metrics_result['map_75'].item(),
-        'map_per_class': metrics_result['map_per_class'].mean().item() if 'map_per_class' in metrics_result else torch.tensor(0.0).item(), # Handle if not directly present or if it's a list
-        'mar_100': metrics_result['mar_100'].item() if 'mar_100' in metrics_result else torch.tensor(0.0).item(),
-        # Add other relevant metrics if needed
+        'mar_100': metrics_result['mar_100'].item(),
     }
     
+    # Handle map_per_class separately, as it can be a tensor with multiple values
+    if 'map_per_class' in metrics_result:
+        # We compute the mean of per-class mAP to get an overall "mean precision"
+        final_metrics['map_per_class'] = metrics_result['map_per_class'].mean().item()
+    else:
+        final_metrics['map_per_class'] = 0.0
+
     return final_metrics
 
 
