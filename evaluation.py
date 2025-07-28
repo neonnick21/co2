@@ -240,16 +240,12 @@ if __name__ == '__main__':
     print(">>> Starting evaluation on the validation set...")
     metrics = evaluate(model, val_loader, num_classes, device)
 
-    # --- Print Metrics ---
     print("\n--- Evaluation Results ---")
-    # Corrected key access for MeanAveragePrecision output (when class_metrics=True)
     print(f"Mean Average Precision (mAP): {metrics['map']:.4f}")
     print(f"mAP@0.50 IoU: {metrics['map_50']:.4f}")
     print(f"mAP@0.75 IoU: {metrics['map_75']:.4f}")
-    # MeanAveragePrecision directly provides overall precision and recall
-    # under these keys when class_metrics=True
-    print(f"Mean Precision: {metrics['detection_precision']:.4f}")
-    print(f"Mean Recall: {metrics['detection_recall']:.4f}")
+    print(f"Mean Precision: {metrics['map_per_class']:.4f}")
+    print(f"Mean Recall: {metrics['mar_100']:.4f}")
     print("--------------------------")
     
     # --- Visualize Predictions ---
