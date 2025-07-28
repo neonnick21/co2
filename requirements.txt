@@ -7,3 +7,5 @@ transformers
 scipy
 accelerate
 safetensors
+torchmetrics
+tqdm
